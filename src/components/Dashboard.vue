@@ -1,247 +1,233 @@
 <template>
-  <div class="app-container">
-    <div class="dashboard-card">
-      <div class="header-section">
-        <div class="base-circle"></div>
-        <h2 class="title-text">Base 资产看板</h2>
-      </div>
-      
-      <div class="status-box">
-        <p v-if="!account" class="text-warning">⚠️ 请先连接 Base 钱包</p>
-        <p v-else-if="chainId !== 8453n" class="text-danger">❌ 当前不在 Base 网络</p>
-        <p v-else class="text-success">✅ 已成功接入 Base 生态</p>
-        <p v-if="account" class="address-tag">{{ shortAddress }}</p>
+  <div class="page-background">
+    <div v-if="isInitializing" class="init-loader">
+      <div class="spinner"></div>
+      <p>Syncing Base Network...</p>
+    </div>
+
+    <div v-else class="dashboard-card">
+      <div class="header">
+        <div class="title-group">
+          <span class="dot"></span>
+          <h1>{{ address ? currentWalletTitle : 'Wallet Assets Dashboard' }}</h1>
+        </div>
+        <div class="mode-tag">Read-only Mode</div>
       </div>
 
-      <button 
-        @click="connectBase" 
-        :class="['btn-base', { 'btn-warning': account && chainId !== 8453n }]"
-      >
-        {{ buttonText }}
-      </button>
+      <div v-if="!address" class="content-fade connect-area">
+        <div class="connect-prompt">
+          <span>⚠️</span> 请先连接您的 Base 钱包
+        </div>
+        <button @click="openWalletModal" class="btn-main">连接钱包</button>
+      </div>
 
-      <div v-show="account && chainId === 8453n" class="chart-section">
-        <div ref="chartRef" class="echarts-dom"></div>
-        <div class="balance-display">
-          <span class="label">当前余额:</span>
-          <span class="value">{{ balance }} ETH</span>
+      <div v-else class="content-fade connected-box">
+        <p class="status-tag">✅ 已同步 Base 生态数据</p>
+        <p class="addr-text">{{ shortAddress }}</p>
+        <button @click="disconnectWallet" class="btn-link-red">断开连接</button>
+        
+        <div id="main-chart"></div>
+
+        <div class="balance-wrap">
+          当前余额: <span class="eth-val">{{ balance }} ETH</span>
         </div>
       </div>
 
+      <transition name="fade">
+        <div v-if="showWalletModal" class="modal-mask">
+          <div class="modal-box">
+            <div class="close-icon-wrap" @click="showWalletModal = false">
+              <span class="close-icon-line line-1"></span>
+              <span class="close-icon-line line-2"></span>
+            </div>
+            
+            <h3 class="modal-title">选择钱包</h3>
+            <div class="wallet-list">
+              <div v-for="wallet in detectedWallets" 
+                   :key="wallet.name" 
+                   class="wallet-item" 
+                   @click="connectToWallet(wallet)">
+                <img :src="wallet.icon || defaultWalletIcon" :alt="wallet.name" />
+                <span>{{ wallet.name }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </transition>
+
       <div class="footer">
-        <p>Built by WindyBuilds @ Base Ecosystem</p>
+        <p class="disclaimer">🔐 仅读取余额，不请求转账权限</p>
+        <p class="author">Built by WindyMD @ Base Ecosystem</p>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, computed, watch } from 'vue';
+import { ref, computed, onMounted, nextTick } from 'vue';
 import { ethers } from 'ethers';
 import * as echarts from 'echarts';
 
-// --- 响应式状态 ---
-const account = ref(null);    // 钱包地址
-const balance = ref(0);       // 余额
-const chainId = ref(null);    // 网络ID
-const chartRef = ref(null);   // ECharts DOM 引用
-let myChart = null;           // ECharts 实例
+const address = ref('');
+const balance = ref('0.0000');
+const isInitializing = ref(true); 
+const showWalletModal = ref(false);
+const detectedWallets = ref([]);
+const currentWalletName = ref('Base ETH'); 
+const currentWalletTitle = ref('Base'); 
+let chart = null;
 
-// --- 计算属性 ---
-// 1. 格式化地址 (显示前6位和后4位)
-const shortAddress = computed(() => {
-  return account.value ? `${account.value.slice(0, 6)}...${account.value.slice(-4)}` : '';
-});
-
-// 2. 动态按钮文字
-const buttonText = computed(() => {
-  if (!account.value) return "连接 Base 钱包";
-  if (chainId.value !== 8453n) return "一键切换至 Base 网络";
-  return "数据已同步";
-});
-
-// --- 核心方法 ---
-
-// 初始化并连接 Base 网络
-const connectBase = async () => {
-  if (!window.ethereum) {
-    alert("请安装 MetaMask 或 Coinbase Wallet!");
-    return;
-  }
-
-  try {
-    const provider = new ethers.BrowserProvider(window.ethereum);
-    
-    // A. 请求授权连接
-    const accounts = await provider.send("eth_requestAccounts", []);
-    account.value = accounts[0];
-
-    // B. 检查并强制切换到 Base 链 (Chain ID: 8453)
-    const network = await provider.getNetwork();
-    chainId.value = network.chainId;
-
-    if (chainId.value !== 8453n) {
-      await switchNetwork();
-    } else {
-      await fetchBalance(provider);
-    }
-  } catch (error) {
-    console.error("连接失败:", error);
-  }
+const staticIcons = {
+  'MetaMask': 'https://upload.wikimedia.org/wikipedia/commons/3/36/MetaMask_Fox.svg',
+  'Coinbase': 'https://avatars.githubusercontent.com/u/18060234?s=280&v=4'
 };
 
-// 切换网络至 Base
-const switchNetwork = async () => {
-  try {
-    await window.ethereum.request({
-      method: 'wallet_switchEthereumChain',
-      params: [{ chainId: '0x2105' }], // 8453 的十六进制
+const defaultWalletIcon = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjOTRhM2I4IiBzdHJva2Utd2lkdGg9IjIiPjxyZWN0IHg9IjMiIHk9IjUiIHdpZHRoPSIxOCIgaGVpZ2h0PSIxNCIgcng9IjMiLz48cGF0aCBkPSJNMTYgMTF2Mm0wIDRoMCIvPjwvc3ZnPg==';
+
+const shortAddress = computed(() => address.value ? `${address.value.slice(0, 6)}...${address.value.slice(-4)}` : '');
+
+const discoverWallets = () => {
+  const wallets = [];
+  if (window.ethereum?.providers?.length) {
+    window.ethereum.providers.forEach(p => {
+      const name = p.isMetaMask ? 'MetaMask' : p.isCoinbaseWallet ? 'Coinbase' : (p.name || 'Browser');
+      wallets.push({ name, icon: staticIcons[name] || p.icon, provider: p });
     });
-    // 切换成功后刷新页面或重新获取数据
-    window.location.reload();
-  } catch (error) {
-    // 如果钱包里没添加过 Base，则帮用户添加
-    if (error.code === 4902) {
-      await window.ethereum.request({
-        method: 'wallet_addEthereumChain',
-        params: [{
-          chainId: '0x2105',
-          chainName: 'Base Mainnet',
-          nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-          rpcUrls: ['https://mainnet.base.org'],
-          blockExplorerUrls: ['https://basescan.org']
-        }]
-      });
-    }
+  } else if (window.ethereum) {
+    const name = window.ethereum.isMetaMask ? 'MetaMask' : 'Base';
+    wallets.push({ name, icon: staticIcons[name], provider: window.ethereum });
   }
+  detectedWallets.value = wallets;
 };
 
-// 获取 Base 链余额
-const fetchBalance = async (provider) => {
-  const rawBalance = await provider.getBalance(account.value);
-  balance.value = parseFloat(ethers.formatEther(rawBalance)).toFixed(4);
-  updateChart();
+const openWalletModal = () => {
+  discoverWallets();
+  showWalletModal.value = true;
 };
 
-// --- ECharts 图表逻辑 ---
-const initChart = () => {
-  if (chartRef.value) {
-    myChart = echarts.init(chartRef.value);
-    const option = {
-      tooltip: { trigger: 'item' },
+const initChart = async () => {
+  await nextTick();
+  setTimeout(() => {
+    const chartDom = document.getElementById('main-chart');
+    if (!chartDom) return;
+    if (chart) chart.dispose();
+    chart = echarts.init(chartDom);
+    chart.setOption({
+      tooltip: { trigger: 'item', formatter: '{b}: <b>{c}</b>' },
       series: [{
-        name: '资产分布',
         type: 'pie',
-        radius: ['60%', '80%'],
-        avoidLabelOverlap: false,
-        itemStyle: { borderRadius: 10, borderColor: '#fff', borderWidth: 2 },
-        label: { show: false },
+        radius: ['65%', '85%'],
+        itemStyle: { borderRadius: 8, borderColor: '#fff', borderWidth: 2 },
         data: [
-          { value: balance.value, name: 'Base ETH', itemStyle: { color: '#0052FF' } },
-          { value: 0.0005, name: 'Gas 预留', itemStyle: { color: '#E2E8F0' } }
-        ]
+          { value: parseFloat(balance.value) || 0, name: currentWalletName.value, itemStyle: { color: '#0052ff' } },
+          { value: 0.0001, name: 'Other Assets', itemStyle: { color: '#f8fafc' } }
+        ],
+        label: { show: false }
       }]
-    };
-    myChart.setOption(option);
-  }
-};
-
-const updateChart = () => {
-  if (myChart) {
-    myChart.setOption({
-      series: [{ data: [
-        { value: balance.value, name: 'Base ETH', itemStyle: { color: '#0052FF' } },
-        { value: 0.0005, name: 'Gas 预留', itemStyle: { color: '#E2E8F0' } }
-      ]}]
     });
-  }
+  }, 200);
 };
 
-// --- 生命周期与监听 ---
-onMounted(() => {
-  initChart();
-  // 如果已经连接过，自动检测网络
-  if (window.ethereum && window.ethereum.selectedAddress) {
-    connectBase();
-  }
-});
+const connectToWallet = async (wallet) => {
+  try {
+    const accounts = await wallet.provider.request({ method: 'eth_requestAccounts' });
+    showWalletModal.value = false;
+    currentWalletName.value = wallet.name + ' ETH';
+    currentWalletTitle.value = wallet.name; 
+    address.value = accounts[0];
+    const provider = new ethers.BrowserProvider(wallet.provider);
+    const rawBalance = await provider.getBalance(address.value);
+    balance.value = parseFloat(ethers.formatEther(rawBalance)).toFixed(4);
+    initChart();
+  } catch (error) { console.error(error); }
+};
 
-// 监听余额变化更新图表
-watch(balance, () => updateChart());
+const disconnectWallet = () => {
+  address.value = '';
+  balance.value = '0.0000';
+  if (chart) { chart.dispose(); chart = null; }
+};
+
+onMounted(() => {
+  setTimeout(() => { isInitializing.value = false; }, 800);
+});
 </script>
 
 <style scoped>
-.app-container {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background-color: #f8fafc;
+/* 基础容器 */
+.page-background { 
+  display: flex; justify-content: center; align-items: center; 
+  min-height: 100vh; background: #f8fafc; font-family: -apple-system, sans-serif; 
 }
 
-.dashboard-card {
-  background: white;
-  padding: 2.5rem;
-  border-radius: 24px;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.05);
-  width: 100%;
-  max-width: 400px;
-  text-align: center;
+/* 主卡片 */
+.dashboard-card { 
+  background: white; padding: 32px; border-radius: 28px; 
+  box-shadow: 0 20px 60px rgba(0,0,0,0.06); width: 380px; 
 }
 
-.header-section {
-  display: flex;
-  align-items: center; /* 垂直对齐：让圆圈和文字对齐 */
-  justify-content: center; /* 水平居中 */
-  margin-bottom: 1.8rem; /* 与下方提示区的间距 */
-  margin-top: -10px; /* 稍微往上移一点点，视觉更平衡 */
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
+.title-group { display: flex; align-items: center; gap: 8px; }
+.dot { width: 9px; height: 9px; background: #0052ff; border-radius: 50%; }
+.title-group h1 { font-size: 1.15rem; font-weight: 700; margin: 0; color: #1e293b; }
+.mode-tag { background: #f1f5f9; color: #64748b; font-size: 11px; padding: 5px 12px; border-radius: 20px; font-weight: 500; }
+
+/* 内容区 */
+.connect-prompt { background: #fffbeb; color: #92400e; padding: 15px; border-radius: 12px; text-align: center; margin-bottom: 20px; font-size: 14px; }
+.btn-main { background: #0052ff; color: white; width: 100%; padding: 16px; border: none; border-radius: 14px; font-weight: 600; cursor: pointer; font-size: 1rem; transition: 0.2s; }
+.btn-main:hover { background: #0045d9; transform: translateY(-1px); }
+
+.connected-box { background: #f0fdf4; padding: 20px; border-radius: 18px; text-align: center; margin-bottom: 20px; }
+.addr-text { color: #64748b; font-family: monospace; margin: 8px 0; font-size: 13px; }
+.btn-link-red { background: none; border: none; color: #ef4444; text-decoration: underline; cursor: pointer; font-size: 12px; }
+
+#main-chart { width: 100%; height: 220px; margin: 10px 0; }
+.eth-val { color: #0052ff; font-weight: 800; font-size: 1.4rem; }
+
+/* 🌟 弹窗美化 */
+.modal-mask { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.5); backdrop-filter: blur(4px); display: flex; justify-content: center; align-items: center; z-index: 1000; }
+
+.modal-box { 
+  background: white; padding: 32px 24px; border-radius: 24px; 
+  width: 330px; position: relative; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  animation: modalScale 0.3s ease-out;
 }
 
-.base-circle {
-  width: 24px; /* 减小圆圈，使其更优雅 */
-  height: 24px;
-  background-color: #0052FF; /* 使用 Base 官方蓝色 */
-  border-radius: 50%; /* 变成正圆 */
-  margin-right: 12px; /* 与文字的横向间距 */
-  box-shadow: 0 0 10px rgba(0, 82, 255, 0.2); /* 淡淡的蓝光，更有科技感 */
+@keyframes modalScale {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
 }
 
-.title-text {
-  color: #1e293b; /* 深灰蓝色，看起来更高级 */
-  font-size: 1.6rem; /* 调整字号，视觉更平衡 */
-  font-weight: 800; /* 加粗 */
-  margin: 0; /* 清除默认边距，保证对齐 */
-  letter-spacing: -0.5px; /* 紧凑一点，Web3 流行风格 */
-}
+.modal-title { margin: 0 0 20px 0; font-size: 1.25rem; font-weight: 700; color: #1e293b; text-align: center; }
 
-.status-box { margin-bottom: 1.5rem; padding: 1rem; background: #f1f5f9; border-radius: 12px; }
-.address-tag { font-family: monospace; font-size: 0.85rem; color: #64748b; margin-top: 5px; }
-
-.text-warning { color: #f59e0b; font-weight: 600; }
-.text-danger { color: #ef4444; font-weight: 600; }
-.text-success { color: #10b981; font-weight: 600; }
-
-.btn-base {
-  width: 100%;
-  background: #0052FF;
-  color: white;
-  border: none;
-  padding: 1rem;
-  border-radius: 12px;
-  font-size: 1.1rem;
-  font-weight: 700;
-  cursor: pointer;
+/* 🌟 右上角 X 按钮样式 */
+.close-icon-wrap {
+  position: absolute; top: 20px; right: 20px;
+  width: 32px; height: 32px;
+  cursor: pointer; border-radius: 50%;
   transition: all 0.2s;
+  display: flex; align-items: center; justify-content: center;
 }
 
-.btn-base:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0, 82, 255, 0.3); }
-.btn-warning { background: #f59e0b; }
+.close-icon-wrap:hover { background: #f1f5f9; transform: rotate(90deg); }
 
-.chart-section { margin-top: 2rem; }
-.echarts-dom { width: 100%; height: 250px; }
+.close-icon-line {
+  position: absolute; width: 18px; height: 2px;
+  background: #64748b; border-radius: 10px;
+}
 
-.balance-display { margin-top: 1rem; font-size: 1.2rem; }
-.balance-display .value { font-weight: 800; color: #0052FF; margin-left: 8px; }
+.line-1 { transform: rotate(45deg); }
+.line-2 { transform: rotate(-45deg); }
 
-.footer { margin-top: 2rem; font-size: 0.8rem; color: #94a3b8; }
+/* 钱包列表项 */
+.wallet-item { 
+  display: flex; align-items: center; gap: 14px; padding: 16px; 
+  border: 1px solid #e2e8f0; border-radius: 16px; cursor: pointer; 
+  margin-top: 12px; transition: all 0.2s; 
+}
+.wallet-item:hover { border-color: #0052ff; background: #f0f7ff; transform: scale(1.02); }
+.wallet-item img { width: 30px; height: 30px; object-fit: contain; }
+.wallet-item span { font-weight: 600; color: #334155; }
+
+.footer { margin-top: 25px; border-top: 1px solid #f1f5f9; padding-top: 15px; text-align: center; font-size: 11px; color: #94a3b8; }
 </style>
